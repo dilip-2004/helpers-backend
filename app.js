@@ -4,64 +4,19 @@
   const express=require('express');
   const cors=require('cors');
   const mongoose=require('mongoose');
+  const nodemailer=require('nodemailer');
   const bodyParser=require('body-parser');
-  const multer=require('multer');
+  const dotenv=require('dotenv');
   const {body,validationResult }=require('express-validator');
   const { v4: uuidv4 } = require('uuid');
   const connectionToDatabase=require('./mongoose');
   const HttpError=require('./HttpError');
 
-  // MINE TYPE MAP
-  const MINE_TYPE_MAP={
-    'image/png':'png',
-    'image/jpeg':'jpeg',
-    'image/jpg':'jpg',
-  }
-
-  // user image upload check
-  const userFileUpload=multer({
-    limits:500000,
-    storage:multer.diskStorage({
-      destination:(req,file,cb)=>{
-        cb(null,'./uploads/userImages');
-      },
-      filename:(req,file,cb)=>{
-        const ext=MINE_TYPE_MAP[file.mimetype];
-        cb(null,uuidv4() + '.' + ext);
-      }
-    }),
-    fileFilter:(req,file,cb)=>{
-      const isValid=!!MINE_TYPE_MAP[file.mimetype];
-      const error=isValid ? null : new Error('Invalid Mine Type');
-      cb(error,isValid);
-    }
-  });
-
-  // helper image upload validation
-  const helperFileUpload=multer({
-    limits:500000,
-    storage:multer.diskStorage({
-      destination:(req,file,cb)=>{
-        cb(null,'./uploads/helperImages');
-      },
-      filename:(req,file,cb)=>{
-        const ext=MINE_TYPE_MAP[file.mimetype];
-        cb(null,uuidv4() + '.' + ext);
-      }
-    }),
-    fileFilter:(req,file,cb)=>{
-      const isValid=!!MINE_TYPE_MAP[file.mimetype];
-      const error=isValid ? null : new Error('Invalid Mine Type');
-      cb(error,isValid);
-    }
-  });
-
+  dotenv.config();
   const app=express();
   app.use(bodyParser.json());
-  app.use('/uploads/userImages',express.static(path.join('uploads','userImages')));
-  app.use('/uploads/helperImages',express.static(path.join('uploads','helperImages')));
   app.use(cors());
-
+  
   // db connection
   connectionToDatabase.connection;
 
@@ -70,7 +25,6 @@
 
   // create schema
   const userSchema=new Schema({
-    userImage:String,
     userName:String,
     userEmail:String,
     userPassword:String,
@@ -82,27 +36,20 @@
   const UserModel=mongoose.model("users",userSchema);
   
   // user signup
-  app.post('/api/user/signup', userFileUpload.single('image'), async (req, res, next) => {
+  app.post('/api/user/signup', async (req, res, next) => {
 
     const { userName, userEmail, userPassword } = req.body;
-
+    
     try {
         const existingUser = await UserModel.findOne({ userEmail: userEmail });
 
         if (existingUser) {
-          if(req.file){
-            fs.unlink(req.file.path,err =>{
-              console.log(err);
-            })
-          }
-            return res.status(422).json({ message: 'Could not signup, email already exists' });
+          return res.status(422).json({ message: 'Could not signup, email already exists' });
         }
 
         const hashedPassword=await bcrypt.hash(userPassword,12);
-        console.log(hashedPassword);
 
         const createUser = new UserModel({
-            userImage:req.file.path,
             userName,
             userEmail,
             userPassword:hashedPassword,
@@ -306,7 +253,7 @@
 
   // helper api
   const helperSchema=new Schema({
-    helperImage:String,
+    helperImageURL:String,
     helperName:String,
     helperDOB:String,
     helperGender:String,
@@ -380,50 +327,22 @@
     res.status(200).json(helperData.toObject({getters:true}));
   });
 
-  // helper signup check part , before phone number verification
-  app.post('/api/helper/signup/check',async (req,res,next)=>{
-
-    const errors=validationResult(req);
-    if(!errors.isEmpty())
-    {
-      return res.status(400).json({message:'invalid input, check you data'});
-    }
-
-    const {helperName,helperDOB,helperGender,helperRole,helperExperience,helperWorkTime,helperEmail,helperPassword,helperConfirmPassword}=req.body;
-
-    const createdHelpers=await HelperModel.find().exec();
-
-    const hasHelper=createdHelpers.find(helper => helper.helperEmail===helperEmail);
-
-    if(hasHelper)
-    {
-      return res.status(422).json({message:'could not signup, email already exists'});
-    }
-
-    res.status(200).json({message:'success'});
-  });
-
   // helper signup part
-  app.post('/api/helper/signup',helperFileUpload.single('image'),async (req,res,next)=>{
+  app.post('/api/helper/signup',async (req,res,next)=>{
 
-    const {helperName,helperDOB,helperGender,helperRole,helperExperience,helperWorkTime,helperEmail,helperPassword,helperConfirmPassword,helperPhoneNumber}=req.body;
+    const {helperName,helperDOB,helperGender,helperRole,helperExperience,helperWorkTime,helperEmail,helperPassword,helperConfirmPassword,helperPhoneNumber,helperImageURL}=req.body;
 
     try {
       const existingHelper = await UserModel.findOne({ helperEmail: helperEmail });
       
       if (existingHelper) {
-        if(req.file){
-          fs.unlink(req.file.path,err =>{
-            console.log(err);
-          })
-        }
         return res.status(422).json({ message: 'Could not signup, email already exists' });
       }
       
       const hashedPassword = await bcrypt.hash(helperPassword,12);
 
       const createHelper=new HelperModel({
-        helperImage:req.file.path,
+        helperImageURL,
         helperName,
         helperDOB,
         helperGender,
@@ -439,11 +358,38 @@
       });
       
       const result = await createHelper.save();
+      console.log(result);
       res.status(201).json(result);
     } catch (err) {
       console.error(err);
       const error = new HttpError('Creating account failed, please try again', 500);
       return next(error);
+    }
+  });
+
+  // helper signup check befor phone number verification
+  app.post('/api/helper/signup/check', async (req, res) => {
+
+    const {
+      helperName,
+      helperDOB,
+      helperGender,
+      helperRole,
+      helperExperience,
+      helperWorkTime,
+      helperEmail,
+      helperPassword,
+      helperPhoneNumber
+    } = req.body;
+    try {
+      const existingHelper = await HelperModel.findOne({ helperEmail });
+      if (existingHelper) {
+        return res.status(400).json({ error: 'Email already in use' });
+      }
+
+      res.status(201).json({ message: 'You are eligible for next step' });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
     }
   });
     
@@ -702,6 +648,73 @@
       res.status(500).json({ message: 'Internal Server Error' });
     }
   });
+
+
+  // otp verification process
+
+  const otpSchema = new mongoose.Schema({
+    email: String,
+    otp: String,
+    number : String,
+    createdAt: { type: Date, expires: '5m', default: Date.now }
+  });
+  const OTP = mongoose.model('otps', otpSchema);
+
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.USER_EMAIL,
+      pass: process.env.USER_PASS
+    }
+  });
+
+  // send OTP to email
+app.post('/api/send-otp', async (req, res) => {
+    const { helperEmail:email, phoneNumber:number } = req.body;
+    console.log(email,number);
+    
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    const newOTP = new OTP({ email, otp , number });
+
+    try {
+      const created=await newOTP.save();
+      console.log('successfull created');
+    } catch (err) {
+      console.log(err);
+    }
+    
+    
+    const mailOptions = {
+      from: process.env.USER_EMAIL,
+      to: email,
+      subject: 'YOUR OTP',
+      text: `Your OTP for number verification is: ${otp}`
+    };
+
+    transporter.sendMail(mailOptions, (error, info) => {
+      if (error) {
+        console.error('Error sending email:', error);
+        res.status(500).send('Failed to send OTP');
+      } else {
+        console.log('Email sent:', info.response);
+        res.status(200).send('OTP sent successfully');
+      }
+    });
+  });
+
+  // verify OTP
+  app.post('/api/verify-otp', async (req, res) => {
+    const { helperEmail:email, otp, PhoneNumber:number } = req.body;
+    
+    const foundOTP = await OTP.findOne({ email, otp });
+    
+    if (foundOTP) {
+      res.status(200).send('OTP verified successfully');
+    } else {
+      res.status(400).send('Invalid OTP');
+    }
+  });
   
 
   //error handling
@@ -720,4 +733,7 @@
     res.json({message: error.message || 'no error'}); 
   });
 
-  app.listen(5000);
+  const port=process.env.PORT || 5000;
+  app.listen(port,() => {
+    console.log(`Server is running on port ${port}`);
+  });
